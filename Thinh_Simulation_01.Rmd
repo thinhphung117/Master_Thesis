@@ -1,0 +1,982 @@
+---
+title: "Untitled"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+date: "2025-08-21"
+---
+---
+title: "Thesis Simulation Part"
+output: html_document
+date: "2025-08-20"
+---
+---
+title: "My Document"
+output: html_document
+---
+
+```{r setup, include= FALSE}
+# Set global chunk options
+knitr::opts_chunk$set(
+	echo = FALSE,
+	error = TRUE,
+	message = TRUE,
+	warning = TRUE,
+	results = "markup"
+)
+```
+### Introduction 
+
+My Thesis "Difference-in-Difference with multiple time periods" is trying to tackle the problems with DiD method related to multiple time periods. 
+DiD method involves comparing the change in outcomes between a treatment group and a control group, both before and after the intervention.
+DiD relies on few assumption: parallel trend, no anticipation, SUTVA, no spilover effect.
+DID is often implemented using a Two-way fixed effects (TWFE) (unit-specific & time-specific fixed effects) model, where the treatment variable is interacted with a time dummy variable. In the canonical DiD 2x2, TWFE is proved to work perfectly.
+The problems raise when DiD is implemented in multiple time periods, TWFE is proved to be biased in some settings (goodman-bacon 2020). Researchers have to find better ways to tackle this problem. There have been few papers publishing in last several years. Among them, 2 methods are becoming popular: CS & SA.
+
+This Thesis Simulation Part is trying to show two things:
+1. Which settings the TWFE works well and which settings doesn't
+2. How CS & SA method perform in the setting where TWFE method fails.
+
+### Part 1: TWFE
+## 1.1 Settings where TWFE performance great
+TWFE works well in setting when there is no staggered adoption, or staggered adoption with homogenenous treatment effect. 
+Although, it could be proved by math, I would like to prove it via simulation.
+I make 3 DGPs for 3 cases: 
+1. not staggered adoption with homogenous treatment effect.
+2. not staggered adoption with dynamic treatment effect.
+3. staggered adoption with the same homogenenous treatment effect tau. 
+
+in each case, I would like to generate a balanced panel dataset with 600 units over the time periods T = 36 years, from 1990 to 2025. These 600 units have both time-varying year effects and time-invariant unit effects (which in the data are independently drawn from N(0,0.5^2)). These units are also incorporated in one of 30 randomly drawn groups, which differ in terms of whether and when treatment was initiated. 
+
+I believe this simulated dataset could be seen in the real-world (for example: 600 firms, assigned randomly in 30 states applying minimum wage policy in different year betwween 1990-2025). 
+I assume the treatment effect once turn on, never turn off.
+I also use monte carlo simulation to check the robustness of the results. 
+
+
+```{r library}
+
+library(tidyverse)
+library(patchwork)
+library(kableExtra)
+library(lfe)
+library(lmtest)
+library(xtable)
+library(did)
+library(magrittr)
+library(ggthemes)
+library(bacondecomp)
+library(multcomp)
+library(fastDummies)
+library(ggforce)
+# set plot features
+select <- dplyr::select
+theme_set(theme_clean() + theme(plot.background = element_blank(),
+                                legend.background = element_blank()))
+set.seed(42)
+
+```
+#1.1.1 Create DGP1: one treatment period, homogenenous treatment effect
+Assume we have 600 firms, randomly assigned to 30 states. 30 states seperated into 2 groups: group 1 (control - C), group 2 (treated - T).group 2 initiate treatment at t= 2008. we set true homogeneous TE constant and equal 2. 
+600 firms have unit-fe ~ N(0,0.5^2) & time-TE is yearly-TE ~ N(2, 0.2^2). 
+```{r data1}
+# Data 1 - One Treatment Period, Homogeneous Treatment Effects --------------
+make_data1 <- function(...) {
+  
+  # Fixed Effects ------------------------------------------------
+  # unit fixed effects
+  unit <- tibble(
+    unit = 1:600, 
+    unit_fe = rnorm(600, 0, 0.5),
+    # generate state
+    state = sample(rep(1:30, 20), 600, replace = FALSE),
+    # generate treatment groups
+    group = case_when(
+      state %in% 1:15 ~ 1,
+      state %in% 16:30 ~ 2
+    ),
+    evertreated = ifelse(group == 2, "T", "C"),
+    # avg yearly treatment effects by group
+    hat_gamma = case_when(
+      group == 2 ~ 2,
+      TRUE ~ 0
+    )) %>%
+    # generate unit specific yearly treatment effects 
+    rowwise() %>% 
+    mutate(gamma = ifelse(group == 2, rnorm(1, hat_gamma, .2), 0)) %>% 
+    ungroup()
+  
+  # year fixed effects 
+  year <- tibble(
+    year = 1990:2025,
+    year_fe = rnorm(36, 0, 0.5))
+  
+  # full interaction of unit X year 
+  crossing(unit, year) %>% 
+    # make error term and get treatment indicators and treatment effects
+    mutate(error = rnorm(nrow(.), 0, 0.5),
+           treat = ifelse(evertreated == "T" & year >= 2008, 1, 0),
+           tau = ifelse(treat == 1, gamma, 0)) %>%
+    # calculate the dep variable
+    mutate(dep_var = unit_fe + year_fe + tau + error)
+}
+
+# make data
+data1 <- make_data1()
+head(data1)
+```
+# Create plot for DGP 1
+```{r plot1}
+knitr::opts_chunk$set(echo = TRUE)
+plot1 <- data1 %>% 
+  ggplot(aes(x = year, y = dep_var, group = unit)) +
+  # unit specific lines
+  geom_line(alpha = 1/10, color = "grey") + 
+  # group specific averages
+  geom_line(
+    data = . %>% 
+      group_by(evertreated, year) %>% 
+      summarize(dep_var = mean(dep_var)),
+    aes(x = year, y = dep_var, group = factor(evertreated),
+        color = factor(evertreated)), size = 1) + 
+  labs(x = "", y = "Value", color = "Group") + 
+  geom_vline(xintercept = 2007.5, color = '#4B5F6C',
+             linetype = "dashed", size = 1) + 
+  scale_color_manual(values = c("#A7473A", "#4B5F6C")) + 
+  ggtitle("Simulation 1") + 
+  labs(subtitle = expression(paste("Not Staggered + Homogenous TE ", tau))) + 
+  theme(legend.position = 'bottom',
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot1
+```
+do 500 simulations, estimate ATT and plot for DGP1
+we run TWFE with monte carlo simulation 500 times. Extract 'estimate' and plot it with true TE tau = 2.
+```{r sim1, include=TRUE}
+# make function to do this by data type 
+dosims <- function(i, fun) {
+  # make data from function
+  dt <- fun()
+  # estimate model and take what you need
+  felm(dep_var ~ treat | unit + year | 0 | state, data = dt) %>% 
+    broom::tidy(conf.int = TRUE) %>% 
+    dplyr::select(estimate) %>% 
+    dplyr::mutate(sim = i)
+}
+
+# estimate over the dataset 500 sims
+simdata1 <- map_dfr(1:500, .f = dosims, fun = make_data1)
+# make plots
+tau1 <- 2
+plot2 <- simdata1 %>% 
+  ggplot(aes(x = estimate)) + 
+  geom_density(fill = "#377EB8", alpha = 1/5) + 
+  geom_vline(xintercept = tau1, linetype = "dashed", color = "#E41A1C", size = 1) + 
+  ggtitle("Simulation 1") + 
+  labs(subtitle = expression(paste("Not Staggered + Homogeneous TE ", tau))) +
+  labs(x = "", y = "Density") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot2
+```
+#1.1.2. Create DGP2: one treatment period, dynamic treatment effect.
+Similar to DGP1, 600 firms ~ N(0, 0.5^2), 30 states, 2 groups: Treated- Control. treated at t = 2008. However, the yearly-TE now is vary over time (dynamic TE).  inititated yearly-TE of firm i in treated group gamma ~ N(0.3, 0.2^2) & over n year, the yearly-TE grow gamma*n (n= t-2008)
+```{r data2, include= TRUE}
+# Data 2 - One Treatment Period, Dynamic Treatment Effects --------------
+
+make_data2 <- function(...) {
+  
+  # Fixed Effects ------------------------------------------------
+  # unit fixed effects
+  unit <- tibble(
+    unit = 1:600, 
+    unit_fe = rnorm(600, 0, 0.5),
+    # generate state
+    state = sample(rep(1:30, 20), 600, replace = FALSE),
+    # generate treatment groups
+    group = case_when(
+      state %in% 1:15 ~ 1,
+      state %in% 16:30 ~ 2
+    ),
+    evertreated = ifelse(group == 2, "T", "C"),
+    # avg yearly treatment effects by group
+    hat_gamma = case_when(
+      group == 2 ~ .3,
+      TRUE ~ 0
+    )) %>%
+    # generate unit specific yearly treatment effects 
+    rowwise() %>% 
+    mutate(gamma = rnorm(1, hat_gamma, .2), 0) %>% 
+    ungroup()
+  
+  # year fixed effects 
+  year <- tibble(
+    year = 1990:2025,
+    year_fe = rnorm(36, 0, 0.5))
+  
+  # full interaction of unit X year 
+  crossing(unit, year) %>% 
+    # make error term and get treatment indicators and treatment effects
+    mutate(error = rnorm(nrow(.), 0, 0.5),
+           treat = ifelse(evertreated == "T" & year >= 2008, 1, 0),
+           tau = ifelse(treat == 1, gamma, 0)) %>%
+    # calculate the dep variable
+    group_by(unit) %>% 
+    mutate(cumtau = cumsum(tau)) %>% 
+    mutate(dep_var = unit_fe + year_fe + cumtau + error)
+}
+
+# make data
+data2 <- make_data2()
+```
+DGP2 plot
+```{r plot2, include=TRUE}
+plot3 <- data2 %>% 
+  ggplot(aes(x = year, y = dep_var, group = unit)) +
+  # unit specific lines
+  geom_line(alpha = 1/10, color = "grey") + 
+  # group specific averages
+  geom_line(
+    data = . %>% 
+      group_by(evertreated, year) %>% 
+      summarize(dep_var = mean(dep_var)),
+    aes(x = year, y = dep_var, group = factor(evertreated),
+        color = factor(evertreated)), size = 1) + 
+  labs(x = "", y = "", color = "Group") + 
+  ylim(c(0-5, 10)) + 
+  geom_vline(xintercept = 2007.5, color = '#4B5F6C',
+             linetype = "dashed", size = 1) + 
+  scale_color_manual(values = c("#A7473A", "#4B5F6C")) + 
+  ggtitle("Simulation 2") + 
+  labs(subtitle = expression(paste("Not Staggered + Dynamic ", tau))) + 
+  theme(legend.position = 'bottom',
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot3
+```
+do 500 simulations, estimate ATT and plot for DGP2
+in this setting, 
+true TE tau = average of all these over 18 years treatmentperiod (2008-2025).
+= (0.3 + 0.6 + 0.9+...+5.4)/18 = 2.85
+```{r sim2}
+# estimate over the dataset 500 sims
+simdata2 <- map_dfr(1:500, .f = dosims, fun = make_data2)
+# make plots
+tau2 <- mean(cumsum(rep(0.3, length(2008:2025))))
+plot4 <- simdata2 %>% 
+  ggplot(aes(x = estimate)) + 
+  geom_density(fill = "#377EB8", alpha = 1/5) + 
+  geom_vline(xintercept = tau2, linetype = "dashed", color = "#E41A1C", size = 1) + 
+  ggtitle("Simulation 2") + 
+  labs(subtitle = expression(paste("Not Staggered + Dynamic ", tau))) +
+  labs(y = "", x = expression(widehat(delta^'DD'))) + 
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+plot4
+```
+#1.1.3 Create DGP3: staggered adoption + homogeneous TE
+To creat staggered adoption, homogenous TE, I assign 600 units, 30 states into 3 groups: group 1 got treated in 1999, group 2 got treated in 2008, group 3 got treated in 2017. no never-treated group. All 3 groups have average yearly TE equal to 3 (constant)  since they got treated. 
+
+```{r data3, include= TRUE}
+# Data 3 - Multiple Treatment Periods and Constant Equal Treatment Effects --------------
+make_data3 <- function(...) {
+  
+  # Fixed Effects ------------------------------------------------
+  # unit fixed effects
+  unit <- tibble(
+    unit = 1:600, 
+    unit_fe = rnorm(600, 0, 0.5),
+    # generate state
+    state = sample(rep(1:30, 20), 600, replace = FALSE),
+    # generate treatment groups
+    group = case_when(
+      state %in% 1:10 ~ 1999,
+      state %in% 11:20 ~ 2008,
+      state %in% 21:30 ~ 2017
+    ),
+    # avg yearly treatment effects by group
+    hat_gamma = case_when(
+      group == 1999 ~ 3,
+      group == 2008 ~ 3,
+      group == 2017 ~ 3
+    )) %>%
+    # generate unit specific yearly treatment effects 
+    rowwise() %>% 
+    mutate(gamma = rnorm(1, hat_gamma, .2), 0) %>% 
+    ungroup()
+  
+  # year fixed effects 
+  year <- tibble(
+    year = 1990:2025,
+    year_fe = rnorm(36, 0, 0.5))
+  
+  # full interaction of unit X year 
+  crossing(unit, year) %>% 
+    # make error term and get treatment indicators and treatment effects
+    mutate(error = rnorm(nrow(.), 0, 0.5),
+           treat = ifelse(year >= group, 1, 0),
+           tau = ifelse(treat == 1, gamma, 0)) %>%
+    # calculate the dep variable
+    mutate(dep_var = unit_fe + year_fe + tau + error)
+}
+
+# make data
+data3 <- make_data3()
+```
+#plot for DGP 3
+```{r plot3, include = TRUE}
+plot5 <- data3 %>% 
+  ggplot(aes(x = year, y = dep_var, group = unit)) +
+  # unit specific lines
+  geom_line(alpha = 1/10, color = "grey") + 
+  # group specific averages
+  geom_line(
+    data = . %>% 
+      group_by(group, year) %>% 
+      summarize(dep_var = mean(dep_var)),
+    aes(x = year, y = dep_var, group = factor(group),
+        color = factor(group)), size = 1) + 
+  labs(x = "", y = "", color = "Group") + 
+  geom_vline(xintercept = 1998.5, color = "#A7473A",
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2007.5, color = "#4B5F6C", 
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2016.5, color = "#51806a", 
+             linetype = "dashed", size = 1) + 
+  scale_color_manual(values = c("#A7473A", "#4B5F6C", "#51806a")) + 
+  ggtitle("Simulation 3") + 
+  labs(subtitle = expression(paste("Staggered + Homogeneous TE ", tau))) + 
+  theme(legend.position = 'bottom',
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot5
+```
+do 500 simulations, estimate ATT and plot for DGP3
+in this setting, true tau = 3
+```{r sim3, include = TRUE}
+# estimate over the dataset 500 sims
+# dosims already above
+simdata3 <- map_dfr(1:500, .f = dosims, fun = make_data3)
+# make plots
+tau3 <- 3
+plot6 <- simdata3 %>% 
+  ggplot(aes(x = estimate)) + 
+  geom_density(fill = "#377EB8", alpha = 1/5) + 
+  geom_vline(xintercept = tau3, linetype = "dashed", color = "#E41A1C", size = 1) + 
+  #geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 1) + 
+  ggtitle("Simulation 3") + 
+  labs(subtitle = expression(paste("Staggered + Homogenous TE ", tau))) +
+  labs(x = "", y = "") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+plot6
+```
+#1.1.4 Plot for 1.1
+```{r plot135,include= TRUE}
+plot_dgp_123 <- plot1 + plot3 + plot5
+plot_dgp_123
+```
+
+```{r plot246, include = TRUE}
+plot_TWFE_work <- plot2 + plot4 + plot6
+plot_TWFE_work
+```
+##1.2: settings where TWFE perform poorly
+TWFE is proved to work poorly in staggered adoption with heterogeneous TE.
+I generate 3 different dataset to prove it. 
+the setting is similar. 600 units, 30 states, 3 groups ~ 3 treatment periods. no never-treated group. 
+#1.2.1: Create DGP4: staggered adoption, constant different treatment
+similar to DGP3, I just change the average TE by group gamma: for group 1999, 6; for group 2008, 3; for group 2017, 1.
+```{r data4, include= TRUE}
+# Data 4 - Multiple Treatment Periods and Constant Different Treatment Effects --------------
+make_data4 <- function(...) {
+  
+  # Fixed Effects ------------------------------------------------
+  # unit fixed effects
+  unit <- tibble(
+    unit = 1:600, 
+    unit_fe = rnorm(600, 0, 0.5),
+    # generate state
+    state = sample(rep(1:30, 20), 600, replace = FALSE),
+    # generate treatment groups
+    group = case_when(
+      state %in% 1:10~ 1999,
+      state %in% 11:20 ~ 2008,
+      state %in% 21:30 ~ 2017
+    ),
+    # avg yearly treatment effects by group
+    hat_gamma = case_when(
+      group == 1999 ~ 6,
+      group == 2008 ~ 3,
+      group == 2017 ~ 1
+    )) %>%
+    # generate unit specific yearly treatment effects 
+    rowwise() %>% 
+    mutate(gamma = rnorm(1, hat_gamma, .2), 0) %>% 
+    ungroup()
+  
+  # year fixed effects 
+  year <- tibble(
+    year = 1990:2025,
+    year_fe = rnorm(36, 0, 0.5))
+  
+  # full interaction of unit X year 
+  crossing(unit, year) %>% 
+    # make error term and get treatment indicators and treatment effects
+    mutate(error = rnorm(nrow(.), 0, 0.5),
+           treat = ifelse(year >= group, 1, 0),
+           tau = ifelse(treat == 1, gamma, 0)) %>%
+    # calculate the dep variable
+    mutate(dep_var = unit_fe + year_fe + tau + error)
+}
+
+# make data
+data4 <- make_data4()
+```
+plot
+```{r plot4, include = TRUE}
+# plot
+plot7 <- data4 %>% 
+  ggplot(aes(x = year, y = dep_var, group = unit)) +
+  # unit specific lines
+  geom_line(alpha = 1/10, color = "grey") + 
+  # group specific averages
+  geom_line(
+    data = . %>% 
+      group_by(group, year) %>% 
+      summarize(dep_var = mean(dep_var)),
+    aes(x = year, y = dep_var, group = factor(group),
+        color = factor(group)), size = 1) + 
+  labs(x = "", y = "Value", color = "Group") + 
+  geom_vline(xintercept = 1998.5, color = "#A7473A",
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2007.5, color = "#4B5F6C" , 
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2016.5, color = "#51806a" , 
+             linetype = "dashed", size = 1) + 
+  scale_color_manual(values = c("#A7473A", "#4B5F6C", "#51806a")) + 
+  ggtitle("Simulation 4") + 
+  labs(subtitle = expression(paste("Staggered + Constant/Unequal ", tau))) + 
+  theme(legend.position = 'bottom',
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot7
+```
+```{r sim4, include= TRUE}
+# do simulations, estimate ATT and plot ---------------------------------
+# make function to do this by data type 
+dosims <- function(i, fun) {
+  # make data from function
+  dt <- fun()
+  # estimate model and take what you need
+  felm(dep_var ~ treat | unit + year | 0 | state, data = dt) %>% 
+    broom::tidy(conf.int = TRUE) %>% 
+    dplyr::select(estimate) %>% 
+    dplyr::mutate(sim = i)
+}
+
+# estimate over the dataset 500 sims
+simdata4 <- map_dfr(1:500, .f = dosims, fun = make_data4)
+# make plots
+tau4 <- sum(c(10/30, 10/30, 10/30)*(c(6, 3, 1)))
+plot8 <- simdata4 %>% 
+  ggplot(aes(x = estimate)) + 
+  geom_density(fill = "#377EB8", alpha = 1/5) + 
+  geom_vline(xintercept = tau4, linetype = "dashed", color = "#E41A1C", size = 1) + 
+  ggtitle("Simulation 4") + 
+  labs(subtitle = expression(paste("Staggered + Constant/Unequal ", tau))) +
+  labs(x = "", y = "Density") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+plot8
+
+```
+#1.2.2 Create DGP5:
+similar to DGP2, but we will have 3 treatment periods instead of 1.
+```{r data5, include = TRUE}
+# Data 5 - Multiple Treatment Periods and Dynamic Equal Treatment Effects --------------
+
+make_data5 <- function(...) {
+  
+  # Fixed Effects ------------------------------------------------
+  # unit fixed effects
+  unit <- tibble(
+    unit = 1:600, 
+    unit_fe = rnorm(600, 0, 0.5),
+    # generate state
+    state = sample(rep(1:30, 20), 600, replace = FALSE),
+    # generate treatment groups
+    group = case_when(
+      state %in% 1:10 ~ 1999,
+      state %in% 11:20 ~ 2008,
+      state %in% 21:30 ~ 2017
+    ),
+    # avg yearly treatment effects by group
+    hat_gamma = case_when(
+      group == 1999 ~ .3,
+      group == 2008 ~ .3,
+      group == 2017 ~ .3
+    )) %>%
+    # generate unit specific yearly treatment effects 
+    rowwise() %>% 
+    mutate(gamma = rnorm(1, hat_gamma, .2), 0) %>% 
+    ungroup()
+  
+  # year fixed effects 
+  year <- tibble(
+    year = 1990:2025,
+    year_fe = rnorm(36, 0, 0.5))
+  
+  # full interaction of unit X year 
+  crossing(unit, year) %>% 
+    # make error term and get treatment indicators and treatment effects
+    mutate(error = rnorm(nrow(.), 0, 0.5),
+           treat = ifelse(year >= group, 1, 0),
+           tau = ifelse(treat == 1, gamma, 0)) %>%
+    # calculate the dep variable
+    group_by(unit) %>% 
+    mutate(cumtau = cumsum(tau)) %>% 
+    mutate(dep_var = unit_fe + year_fe + cumtau + error)
+}
+
+# make data
+data5 <- make_data5()
+```
+plot for data 5
+```{r plot5, include = TRUE}
+# plot 
+plot9 <- data5 %>% 
+  ggplot(aes(x = year, y = dep_var, group = unit)) +
+  # unit specific lines
+  geom_line(alpha = 1/10, color = "grey") + 
+  # group specific averages
+  geom_line(
+    data = . %>% 
+      group_by(group, year) %>% 
+      summarize(dep_var = mean(dep_var)),
+    aes(x = year, y = dep_var, group = factor(group),
+        color = factor(group)), size = 1) + 
+  labs(x = "", y = "", color = "Group") + 
+  geom_vline(xintercept = 1998.5, color = "#A7473A",
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2007.5, color = "#4B5F6C" , 
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2016.5, color = "#51806a" , 
+             linetype = "dashed", size = 1) + 
+  scale_color_manual(values = c("#A7473A", "#4B5F6C", "#51806a")) + 
+  scale_y_continuous(limits = c(-1, 10)) + 
+  ggtitle("Simulation 5") + 
+  labs(subtitle = expression(paste("Staggered + Dynamic/Equal ", tau))) +
+  theme(legend.position = 'bottom',
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot9
+```
+do 500 simulations, estimate ATT and plot for DGP5
+
+```{r sim5, include= TRUE}
+# do simulations, estimate ATT and plot ---------------------------------
+# estimate over the dataset 500 sims
+simdata5 <- map_dfr(1:500, .f = dosims, fun = make_data5)
+# make plots 
+tau5 <- # ATT for treated group in 1999
+  (10/30) * mean(cumsum(rep(0.3, length(1999:2025)))) + 
+  # ATT for treated group in 2008
+  (10/30) * mean(cumsum(rep(0.3, length(2008:2025)))) + 
+  # ATT for treated group in 2017
+  (10/30) * mean(cumsum(rep(0.3, length(2017:2025))))
+plot10 <- simdata5 %>% 
+  ggplot(aes(x = estimate)) + 
+  geom_density(fill = "#377EB8", alpha = 1/5) + 
+  geom_vline(xintercept = tau5, linetype = "dashed", color = "#E41A1C", size = 1) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 1) + 
+  ggtitle("Simulation 5") + 
+  labs(subtitle = expression(paste("Staggered + Dynamic/Equal ", tau))) +
+  labs(y = "", x = expression(widehat(delta^'DD'))) + 
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+plot10
+```
+#1.2.3 Create DGP6: combine between DGP5 and DGP4, dynamic effect + different gamma.
+```{r data6, include = TRUE}
+# Data 6 - Multiple Treatment Periods and Dynamic Treatment Effects --------------
+make_data6 <- function(...) {
+  
+  # Fixed Effects ------------------------------------------------
+  # unit fixed effects
+  unit <- tibble(
+    unit = 1:600, 
+    unit_fe = rnorm(600, 0, 0.5),
+    # generate state
+    state = sample(rep(1:30, 20), 600, replace = FALSE),
+    # generate treatment groups
+    group = case_when(
+      state %in% 1:10 ~ 1999,
+      state %in% 11:20 ~ 2008,
+      state %in% 21:30 ~ 2017
+    ),
+    # avg yearly treatment effects by group
+    hat_gamma = case_when(
+      group == 1999 ~ .5,
+      group == 2008 ~ .3,
+      group == 2017 ~ .1
+    )) %>%
+    # generate unit specific yearly treatment effects 
+    rowwise() %>% 
+    mutate(gamma = rnorm(1, hat_gamma, .2), 0) %>% 
+    ungroup()
+  
+  # year fixed effects 
+  year <- tibble(
+    year = 1990:2025,
+    year_fe = rnorm(36, 0, 0.5))
+  
+  # full interaction of unit X year 
+  crossing(unit, year) %>% 
+    # make error term and get treatment indicators and treatment effects
+    mutate(error = rnorm(nrow(.), 0, 0.5),
+           treat = ifelse(year >= group, 1, 0),
+           tau = ifelse(treat == 1, gamma, 0)) %>%
+    # calculate the dep variable
+    group_by(unit) %>% 
+    mutate(cumtau = cumsum(tau)) %>% 
+    mutate(dep_var = unit_fe + year_fe + cumtau + error)
+}
+
+# make data
+data6 <- make_data6()
+```
+
+plot for DGP6
+```{r plot6, include = TRUE}
+plot11 <- data6 %>% 
+  ggplot(aes(x = year, y = dep_var, group = unit)) +
+  # unit specific lines
+  geom_line(alpha = 1/10, color = "grey") + 
+  # group specific averages
+  geom_line(
+    data = . %>% 
+      group_by(group, year) %>% 
+      summarize(dep_var = mean(dep_var)),
+    aes(x = year, y = dep_var, group = factor(group),
+        color = factor(group)), size = 1) + 
+  labs(x = "", y = "", color = "Group") + 
+  geom_vline(xintercept = 1998.5, color = "#A7473A",
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2007.5, color = "#4B5F6C" , 
+             linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = 2016.5, color = "#51806a" , 
+             linetype = "dashed", size = 1) + 
+  scale_color_manual(values = c("#A7473A", "#4B5F6C", "#51806a")) + 
+  scale_y_continuous(limits = c(-1, 20)) + 
+  ggtitle("Simulation 6") + 
+  labs(subtitle = expression(paste("Staggered + Dynamic/Unequal ", tau))) +
+  theme(legend.position = 'bottom',
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5), 
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.title.y = element_text(hjust = 0.5, vjust = 0.5, angle = 360))
+plot11
+```
+```{r sim6, include= TRUE}
+# do 500 simulations, estimate ATT and plot ---------------------------------
+# make function to do this by data type 
+dosims <- function(i, fun) {
+  # make data from function
+  dt <- fun()
+  # estimate model and take what you need
+  felm(dep_var ~ treat | unit + year | 0 | state, data = dt) %>% 
+    broom::tidy(conf.int = TRUE) %>% 
+    dplyr::select(estimate) %>% 
+    dplyr::mutate(sim = i)
+}
+
+# estimate over the dataset 500 sims
+simdata6 <- map_dfr(1:500, .f = dosims, fun = make_data6)
+tau6 <- tau6 <- 
+  # ATT for treated group in 1999
+  (10/30) * mean(cumsum(rep(0.5, length(1999:2025)))) + 
+  # ATT for treated group in 1998
+  (10/30) * mean(cumsum(rep(0.3, length(2008:2025)))) + 
+  # ATT for treated group in 2007
+  (10/30) * mean(cumsum(rep(0.1, length(2017:2025))))
+plot12 <- simdata6 %>% 
+  ggplot(aes(x = estimate)) + 
+  geom_density(fill = "#377EB8", alpha = 1/5) + 
+  geom_vline(xintercept = tau6, linetype = "dashed", color = "#E41A1C", size = 1) + 
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 1) + 
+  ggtitle("Simulation 6") + 
+  labs(subtitle = expression(paste("Staggered + Dynamic/Unequal ", tau))) +
+  labs(x = "", y = "") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+plot12
+```
+#1.2.4 plot for 1.2
+```{r plot7911, include= TRUE}
+plot_dgp_456 <- plot7+ plot9+ plot11
+plot_dgp_456
+```
+
+```{r plot81012, include = TRUE}
+plot_TWFE_not_work <- plot8+ plot10+ plot12
+plot_TWFE_not_work
+```
+
+##1.3 conclusion:
+TWFE doesnt work well in heterogenenous TE. In DGP6, TWFE even gives negative estimates while in setting, all of the treatment effect are positive. it is because TWFE includes 'forbidden' comparisons, between early treated groups & later treated groups. 
+(to find more insight, reader can find in paper of Goodman-Bacon 2020)
+to solve this problem, CS & SA proposed different methods; only keeping clean comparisions, and making the result roburst. 
+
+
+### Part2: CS & SA methods
+CS & SA
+##2.1 CS methods (briefly)
+#2.1.1 key assumption: 
+  Assummption 1: Random sampling. iid
+  Assumption 2: conditional parallel trend based on a "Never-treated" group
+  Assumption 3: conditional parallell trend based on a "Not-yet-treated" group
+  Assumption 4: Irreversibility of Treatment
+  Assumption 5: Overlap
+  Assumption 6: No Anticipation.
+#2.1.2 parameters of interest:  ATT(g,t), 'group-time average treatment effect', group - cohort g (first treated year g), time period t.
+#2.1.3 How CS works
+CS first estimate the full grid of cohort-by-time effects, then aggregate them into whichever summary you care about.(Dynamic event-time, group average, calendar-time average, overall ATT)
+##2.2 SA methods (briefly)
+#2.2.1 Assumptions
+Assumption 1: Parallel trend in baseline
+Assumption 2: No anticipatory
+Assumption 3: Treatment Effect Homogeneity
+#2.2.2 parameters of interest:
+interaction-weighted (IW) event-time effect: for each relative time 
+k (e.g., 2 years after treatment), they take a weighted average across cohorts of the cohort-specific effects at k, using only not-yet-treated units as comparisons. The weights are the cohorts’ shares among observations that contribute at that k (and are nonnegative and sum to 1).
+##2.3 compare CS & SA (briefly)
+#2.3.1 Framework
+CS: focus on estimating ATT(g,t), build up an overall effect by aggregating these ATTs
+SA: focus on event-study designs (relative time since treatment), corrects the TWFE event-study
+regression so that each event-time coefficient is not contaminated by already-treated groups
+#2.3.2 parallel trend assummption
+CS:conditional parallel trend (not-yet treated & never treated)
+SA:Parellel trend in baseline (stricter, only never-treated)
+#2.3.3 treatment effect dynamic
+CS: very general heterogeneity in treatment effects (by group and overtime)
+SA: focus on dynamic treatmnet effects relative to treatment adoption
+#2.3.4 No Anticipation
+applied for both CS & SA
+
+##2.4 simulation
+To compare between CS & SA, and to prove that we can use these method in dynamic TE, we will use DGP6. 
+#2.4.1 CS
+```{r CS, include= TRUE}
+# Callaway Sant'Anna -------------------------------------------------------------
+# create a lead/lag indicators
+data <- data6 %>% 
+  # variable with relative year from treatment
+  mutate(rel_year = year - group) %>% 
+  # drop observations after 2016 bc all treated 
+  filter(year <= 2016) %>% 
+  dplyr::arrange(group, unit, year) %>% 
+  ungroup()
+
+# first get percentage contribution to each lead/lag indicator by treatment cohort for weights
+# we will need this for the Abraham/Sun method, as well as the true treatment indicator
+# calculate weights
+weights <- data %>% 
+  mutate(rel_year = year - group) %>% 
+  # drop 2017 adopters
+  filter(group != 2017) %>% 
+  group_by(group, rel_year) %>% 
+  count %>% 
+  ungroup() %>% 
+  group_by(rel_year) %>% 
+  mutate(total = sum(n),
+         perc = n / total) %>% 
+  # keep just the variables we need
+  select(rel_year, group, perc) %>% 
+  ungroup() %>% 
+  # get rid of negative numbers because glmt is weird
+  mutate(rel_year2 = rel_year - min(rel_year)) %>% 
+  rowwise() %>% 
+  # add variable equal to coefficient from regression
+  mutate(term = paste0("cohort_", group, "_", rel_year2)) %>% 
+  ungroup()
+
+# make a dataset with the theoretical values to merge in
+true_effect <- weights %>% 
+  # add in the multiples
+  mutate(
+    multiple = case_when(
+      rel_year < 0 ~ 0,
+      rel_year >= 0 ~ rel_year + 1),
+    # add in the tau_g values 
+    tau_g = case_when(
+      group == 1999 ~ .5,
+      group == 2008 ~ .3,
+      group == 2017 ~ .1),
+    # multiply the two 
+    effect = multiple*tau_g) %>% 
+  #collapse by  time period 
+  group_by(rel_year) %>% 
+  summarize(true_tau = weighted.mean(effect, w = perc)) %>% 
+  # make the time variable for merging
+  mutate(t = rel_year)
+
+# create a first treated variable which is 0 for the 2017 cohort
+data <- data %>% 
+  mutate(first_treat = if_else(group == 2017, 0, group))
+
+# run the CS algorithm
+CS_out <- att_gt(yname = "dep_var", 
+                 data = data,
+                 gname = "first_treat",
+                 idname = "unit", 
+                 tname = "year", 
+                 clustervars = "state",
+                 bstrap = T, 
+                 cband = T,
+                 est_method = "reg",
+                 control_group = "notyettreated",
+                 print_details = F)
+
+# get the event study estimates
+es <- aggte(CS_out, type = "dynamic")
+
+# plot
+CS_ES <- tibble(
+  t = es$egt,
+  estimate = es$att.egt,
+  se = es$se.egt,
+  conf.low = estimate - 1.96*se,
+  conf.high = estimate + 1.96*se
+) %>% 
+  #keep just years -5 to 5
+  filter(t %>% between(-5, 5)) %>% 
+  left_join(true_effect) %>% 
+  # split the error bands by pre-post
+  mutate(band_groups = case_when(
+    t < -1 ~ "Pre",
+    t >= 0 ~ "Post",
+    t == -1 ~ ""
+  )) %>%
+  # plot
+  ggplot(aes(x = t, y = estimate)) + 
+  geom_line(aes(x = t, y = true_tau, color = "True Effect"), linetype = "dashed") + 
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, group = band_groups),
+              color = "lightgrey", alpha = 1/4) + 
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high, color = "Estimated Effect"), show.legend = FALSE) + 
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = -0.5, linetype = "dashed") + 
+  scale_x_continuous(breaks = -5:5) + 
+  labs(x = "Relative Time", y = expression(widehat(delta)['it'])) +
+  scale_color_manual(values = c("#A7473A", "#4B5F6C")) + 
+  ggtitle("Callaway & Sant'Anna") + 
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.title.y = element_text(angle = 360, hjust = 0.5, vjust = 0.5))
+CS_ES
+```
+#2.4.2 SA
+```{r SA, include = TRUE}
+# Abraham and Sun -------------------------------------------------------------
+## Make cohort-relative time dummies
+dataAS <- data %>% 
+  # replace rel_year = NA if last treated group
+  mutate(rel_year2 = if_else(group == 2017, as.numeric(NA), rel_year),
+         rel_year2 = rel_year2 - min(rel_year2, na.rm = TRUE)) %>% 
+  # make a variable that is the interaction of group and relative year
+  rowwise() %>% 
+  mutate(cohort = if_else(group == 2017, as.character(NA), paste0(group, "_", rel_year2))) %>% 
+  ungroup() %>% 
+  dummy_cols(select_columns = "cohort", ignore_na = TRUE) %>% 
+  mutate_at(vars(starts_with("cohort_")), ~replace_na(., 0))
+
+# put the covariates into a vector form
+# get the relative time indicators we use form the weights file
+covs <- weights %>% filter(rel_year != -1 & rel_year > min(rel_year)) %>% pull(term)
+
+# estimate the saturated model
+fit <- felm(as.formula(paste("dep_var ~ ", paste(covs, collapse = "+"), "| unit + year | 0 | state")), 
+            data = dataAS, exactDOF = TRUE)
+
+# get the coefficients and make a dataset for plotting
+coefs <- fit$coefficients %>%
+  # add in coefficient name to tibble
+  as_tibble(rownames = "term") %>% 
+  # bring in weights
+  left_join(., weights)
+
+# get the relevant coefficients and weights into a string to get the linear combination
+get_lincom <- function(ll) {
+  # get just the coefficients for a specific lead lag
+  cf2 <- coefs %>% filter(rel_year == ll)
+  # paste the function that goes into the linear combination function
+  F <- paste(paste(cf2$perc, cf2$term, sep = " * ", collapse = " + "), " = 0")
+  # take linear combination and put into a data frame
+  broom::tidy(
+    confint(glht(fit, linfct = F)),
+    conf.int = TRUE
+  ) %>% mutate(rel_year = ll)
+}
+
+# run over all lead/lags
+AS_plot <- map_df(c(-5:-2, 0:5), get_lincom) %>% 
+  # add time variable
+  mutate(t = c(-5:-2, 0:5))
+
+#Plot the results
+SA_ES <- AS_plot %>% 
+  select(t, estimate, conf.low, conf.high) %>% 
+  # add in data for year -1 (all zeros)
+  bind_rows(tibble(t = -1, estimate = 0, 
+                   conf.low = 0, conf.high = 0
+  )) %>% 
+  left_join(true_effect) %>% 
+  # split the error bands by pre-post
+  mutate(band_groups = case_when(
+    t < -1 ~ "Pre",
+    t >= 0 ~ "Post",
+    t == -1 ~ ""
+  )) %>%
+  # plot
+  ggplot(aes(x = t, y = estimate)) + 
+  geom_line(aes(x = t, y = true_tau, color = "True Effect"), linetype = "dashed") + 
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, group = band_groups),
+              color = "lightgrey", alpha = 1/4) + 
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high, color = "Estimated Effect"), show.legend = FALSE) + 
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = -0.5, linetype = "dashed") + 
+  scale_x_continuous(breaks = -5:5) + 
+  labs(x = "Relative Time", y = expression(widehat(delta)['it'])) +
+  scale_color_manual(values = c("#A7473A", "#4B5F6C")) + 
+  ggtitle("Sun & Abraham") + 
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        axis.title.y = element_text(angle = 360, hjust = 0.5, vjust = 0.5))
+SA_ES
+```
+
+
+
+## 2.4.3 part 2 plots
+```{r plotCSSA, include= TRUE}
+plot_CS_SA <- CS_ES + SA_ES
+plot_CS_SA
+```
+
+##conclusion:
+SA & CS give a good estimate in this setting.
+
+
